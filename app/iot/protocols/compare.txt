@@ -1,0 +1,12 @@
+┌─────────┬──────────┬────────┬──────┬────────┬─────────────────────┐
+│Protocol │ TypeName │ Range  │Speed │ Power  │ Best For            │
+├─────────┼──────────┼────────┼──────┼────────┼─────────────────────┤
+│GPIO     │Digital   │1m      │⚡⚡⚡  │Low     │ON/OFF، Button     │
+│I2C      │Serial    │5m      │⚡⚡   │Low     │Sensors، LCD        │
+│SPI      │Serial    │5m      │⚡⚡⚡  │Low     │Memory، Fast ADC   │
+│UART     │Serial    │15m     │⚡⚡   │Low     │GPS، Serial Device  │
+│PWM      │Digital   │1m      │⚡⚡⚡  │Mid     │LED، Motor، Servo  │
+│Modbus   │Bus       │1-4km   │⚡    │Low     │Industrial، Meter    │
+│LoRa     │Wireless  │10km+   │⚡    │V-Low   │Remote IoT           │
+│Zigbee   │Wireless  │100m    │⚡⚡   │V-Low   │Smart Home، Mesh    │
+└─────────┴──────────┴────────┴──────┴────────┴─────────────────────┘

@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+
+# Env
+.env
+
+# Logs & runtime files
+logs/
+media/
+mqtt_logs.json
+
+# Alembic (اختیاری – اگر نمی‌خوای migrationها برن)
+alembic/versions/
+
+# OS
+.DS_Store

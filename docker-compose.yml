@@ -1,0 +1,151 @@
+version: '3.9'
+
+services:
+  db:
+    image: postgres:15
+    container_name: greeni_db
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U greeni"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    networks:
+      - greeni-network
+
+  redis:
+    image: redis/redis-stack-server:latest
+    container_name: greeni_redis
+    restart: always
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - greeni-network
+
+
+  redisinsight:
+    image: redislabs/redisinsight:1.14.0
+    container_name: greeni_redisinsight
+    restart: always
+    ports:
+      - "8001:8001"
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail http://localhost:8001 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    depends_on:
+      - redis
+    networks:
+      - greeni-network
+
+  backend:
+    build:
+      context: .
+    container_name: greeni_backend
+    restart: always
+    env_file:
+      - .env
+    depends_on:
+      - db
+      - redis
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+    command: >
+      sh -c "./wait-for-it.sh db:5432 --timeout=30 --strict -- 
+         alembic upgrade head &&
+         uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - greeni-network
+
+  celery_worker:
+    build:
+      context: .
+    container_name: greeni_celery_worker
+    restart: always
+    depends_on:
+      - redis
+      - db
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+    command: celery -A app.worker worker --loglevel=info
+    healthcheck:
+      test: ["CMD", "celery", "-A", "app.worker", "status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - greeni-network
+
+  frontend:
+    build:
+      context: ../nginx
+    container_name: nginx
+    restart: always
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail http://localhost || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - greeni-network
+
+  mosquitto:
+    image: eclipse-mosquitto:2.0
+    container_name: greeni_mosquitto
+    restart: always
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 1883 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    volumes:
+      - ./mosquitto/config/mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - mosquitto_data:/mosquitto/data
+      - mosquitto_log:/mosquitto/log
+
+    networks:
+      - greeni-network
+
+
+
+volumes:
+  postgres_data:
+  mosquitto_data:
+  mosquitto_config:
+  mosquitto_log:
+
+networks:
+  greeni-network:
+    driver: bridge
