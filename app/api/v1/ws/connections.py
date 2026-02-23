@@ -2,11 +2,13 @@
 from typing import List, Dict
 from starlette.websockets import WebSocket
 
-# کانکشن‌های فعال بر اساس نوع
+# Active WebSocket connections grouped by channel name.
+# Keys must match what the MQTT handler calls via get_connections().
 connections: Dict[str, List[WebSocket]] = {
-    "media": [],
-    "system_info": [],
-    "devices": [],
+    "media":   [],   # media file operations
+    "command": [],   # command dispatch & status updates
+    "system":  [],   # system info (CPU, memory, temp, reboot acks)
+    "devices": [],   # generic device events
 }
 
 def add_connection(group: str, websocket: WebSocket):
