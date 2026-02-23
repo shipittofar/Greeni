@@ -16,7 +16,7 @@ from app.db.session import SessionLocal
 from app.db.init_data import init_data
 from app.core.healthcheck import run_health_checks
 from app.api.v1.ws import system_health
-from app.iot.mqtt.client import start_mqtt_loop
+from app.iot.mqtt.client import start_mqtt_loop, shutdown_mqtt
 from app.core.logging_config import setup_logging, patch_logging, bind_context
 import redis.asyncio as aioredis
 
@@ -151,6 +151,8 @@ async def shutdown_event():
             logger.info("MQTT Task cancelled cleanly")
         except asyncio.CancelledError:
             logger.warning("MQTT Task cancellation interrupted")
+    # Gracefully disconnect the MQTT client from the broker
+    await shutdown_mqtt()
 
 # -------------------
 # Custom OpenAPI for Swagger OAuth2

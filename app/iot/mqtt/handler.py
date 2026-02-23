@@ -6,76 +6,119 @@ from loguru import logger
 from app.db.session import SessionLocal
 from app.crud.command import command as crud_command
 
+
 async def handle_message(topic: str, data: dict):
-    """
-    Handler اصلی برای همه پیام‌های MQTT
-    """
+    """Main dispatcher for all inbound MQTT messages."""
     try:
-        logger.info(f"[MQTT Handler] Message received on {topic}: {data}")
+        logger.info(f"[MQTT Handler] topic='{topic}' data={data}")
     except Exception as e:
-        logger.exception(f"❌ Error printing MQTT message: {e}")
+        logger.exception(f"[MQTT Handler] Error logging message: {e}")
         return
 
-    # --------------------------------
-    # پاسخ media_list
-    # --------------------------------
+    # ------------------------------------------------------------------
+    # greeni/device/{id}/media/media_list
+    # ------------------------------------------------------------------
     if topic.endswith("/media/media_list"):
-        files = data.get("files", [])
-        ws_group = list(get_connections("media"))
-        for ws in ws_group:
-            try:
-                await ws.send_json({
-                    "event": "media_list",
-                    "files": files
-                })
-            except Exception as e:
-                logger.exception(f"❌ Failed to send WS media_list message: {e}")
+        await _handle_media_list(topic, data)
 
-    # --------------------------------
-    # پاسخ status فرمان
-    # --------------------------------
+    # ------------------------------------------------------------------
+    # greeni/device/{id}/commands/status
+    # ------------------------------------------------------------------
     elif "commands" in topic and topic.endswith("/status"):
-        # ✅ آپدیت وضعیت فرمان در DB
-        asyncio.create_task(_update_command_status_safe(topic, data))
+        await _handle_command_status(topic, data)
 
-        # ارسال به همه WebSocket های command
-        ws_group = list(get_connections("command"))
-        for ws in ws_group:
-            try:
-                await ws.send_json({
-                    "event": "command_status",
-                    "topic": topic,
-                    "data": data
-                })
-            except Exception as e:
-                logger.exception(f"❌ Failed to send WS command_status message: {e}")
+    # ------------------------------------------------------------------
+    # greeni/device/{id}/data
+    # ------------------------------------------------------------------
+    elif topic.endswith("/data"):
+        await _handle_device_data(topic, data)
+
+    # ------------------------------------------------------------------
+    # greeni/device/{id}/system/info
+    # ------------------------------------------------------------------
+    elif topic.endswith("/system/info"):
+        await _handle_system_info(topic, data)
+
+    else:
+        logger.debug(f"[MQTT Handler] Unhandled topic: '{topic}'")
+
+
+# ---------------------------------------------------------------------------
+# Private handlers
+# ---------------------------------------------------------------------------
+
+async def _handle_media_list(topic: str, data: dict):
+    files = data.get("files", [])
+    ws_group = list(get_connections("media"))
+    for ws in ws_group:
+        try:
+            await ws.send_json({"event": "media_list", "files": files})
+        except Exception as e:
+            logger.exception(f"[MQTT Handler] Failed to send media_list via WS: {e}")
+
+
+async def _handle_command_status(topic: str, data: dict):
+    # Persist to DB
+    asyncio.create_task(_update_command_status_safe(topic, data))
+
+    # Broadcast to all command WebSocket clients
+    ws_group = list(get_connections("command"))
+    for ws in ws_group:
+        try:
+            await ws.send_json({
+                "event": "command_status",
+                "topic": topic,
+                "data": data,
+            })
+        except Exception as e:
+            logger.exception(f"[MQTT Handler] Failed to send command_status via WS: {e}")
+
+
+async def _handle_device_data(topic: str, data: dict):
+    """Persist sensor/telemetry data sent by a device."""
+    try:
+        from app.iot.device_data.receiver import process_device_data
+        await process_device_data(topic, data)
+    except Exception as e:
+        logger.exception(f"[MQTT Handler] Failed to process device data: {e}")
+
+
+async def _handle_system_info(topic: str, data: dict):
+    """Forward system info to any connected system WebSocket clients."""
+    device_id = topic.split("/")[2] if len(topic.split("/")) > 2 else None
+    ws_group = list(get_connections("system"))
+    for ws in ws_group:
+        try:
+            await ws.send_json({
+                "event": "system_info",
+                "device_id": device_id,
+                "data": data,
+            })
+        except Exception as e:
+            logger.exception(f"[MQTT Handler] Failed to send system_info via WS: {e}")
 
 
 async def _update_command_status_safe(topic: str, data: Dict):
-    """
-    آپدیت وضعیت فرمان در DB به صورت async-safe
-    """
+    """Persist command status update from device — uses a dedicated sync session."""
     try:
         uuid = data.get("uuid")
         if not uuid:
-            logger.warning(f"[Command Status] No uuid in message: {data}")
+            logger.warning(f"[Command Status] No uuid in payload: {data}")
             return
 
-        # استفاده از SessionLocal مستقل تا با کد sync موجود تداخل نکند
         db = SessionLocal()
         try:
             cmd_obj = crud_command.get_by_uuid(db, uuid)
             if not cmd_obj:
-                logger.warning(f"[Command Status] Command not found in DB: {uuid}")
+                logger.warning(f"[Command Status] Command not found: uuid={uuid}")
                 return
 
-            # آپدیت فیلدها
             cmd_obj.status = data.get("status", cmd_obj.status)
             cmd_obj.payload = data.get("payload", cmd_obj.payload)
             db.commit()
             db.refresh(cmd_obj)
-            logger.info(f"[Command Status] Updated command {uuid} to {cmd_obj.status}")
+            logger.info(f"[Command Status] uuid={uuid} → status={cmd_obj.status}")
         finally:
             db.close()
     except Exception as e:
-        logger.exception(f"❌ Failed to update command status from MQTT message: {e}")
+        logger.exception(f"[Command Status] Failed to update from MQTT: {e}")
