@@ -10,7 +10,7 @@ load_dotenv()
 
 BROKER_HOST = os.getenv("MQTT_BROKER_HOST", "localhost")
 BROKER_PORT = int(os.getenv("MQTT_BROKER_PORT", 1883))
-CLIENT_ID = os.getenv("MQTT_CLIENT_ID", "greeni-device-client")
+CLIENT_ID = os.getenv("MQTT_CLIENT_ID", "greeni-server")
 USERNAME = os.getenv("MQTT_USERNAME")
 PASSWORD = os.getenv("MQTT_PASSWORD")
 USE_TLS = os.getenv("MQTT_USE_TLS", "false").lower() == "true"
@@ -37,18 +37,32 @@ logger.add(
 
 mqtt_client = MQTTClient(CLIENT_ID)
 _mqtt_connected_event = asyncio.Event()
-_mqtt_task = None
+_mqtt_listen_task = None  # tracks the inner listen coroutine
 
+
+# ---------------------------------------------------------------------------
+# Callbacks
+# ---------------------------------------------------------------------------
 
 async def on_connect(client, flags, rc, properties):
-    logger.info("[MQTT] Connected")
+    logger.info("[MQTT] Connected to broker")
     _mqtt_connected_event.set()
-    client.subscribe("greeni/device/+/media/media_list", qos=0)
+
+    # Subscribe to all uplink topics
+    client.subscribe("greeni/device/+/media/media_list", qos=1)
+    client.subscribe("greeni/device/+/commands/status", qos=1)
+    client.subscribe("greeni/device/+/data", qos=1)
+    client.subscribe("greeni/device/+/system/info", qos=0)
+    logger.info("[MQTT] Subscribed to all device topics")
 
 
-async def on_message(client, topic, payload, qos, properties):
+async def on_disconnect(client, packet, exc=None):
+    _mqtt_connected_event.clear()
+    logger.warning("[MQTT] Disconnected from broker")
+
+
+async def on_message(client, topic: str, payload, qos, properties):
     try:
-        # decode فقط همینجا
         if isinstance(payload, bytes):
             payload = payload.decode()
 
@@ -60,66 +74,87 @@ async def on_message(client, topic, payload, qos, properties):
             raise TypeError(f"Unexpected payload type: {type(payload)}")
 
         device_id = topic.split("/")[2] if len(topic.split("/")) > 2 else None
-        logger.bind(device_id=device_id).info(f"Received message: {data}")
+        logger.bind(device_id=device_id).info(f"[MQTT] Message on '{topic}': {data}")
 
         from app.iot.mqtt.handler import handle_message
-        # ⚠️ توجه: اینجا دیگه نیازی نیست دوباره json.loads توی handle_message بزنی
         asyncio.create_task(handle_message(topic, data))
 
+    except json.JSONDecodeError as e:
+        logger.error(f"[MQTT] Invalid JSON on topic '{topic}': {e}")
     except Exception as e:
-        logger.exception(f"Failed to handle message from topic {topic}: {e}")
+        logger.exception(f"[MQTT] Failed to handle message from topic '{topic}': {e}")
 
 
-# async def start_mqtt_loop():
-#     global _mqtt_task
-
-#     mqtt_client.on_connect = lambda c, f, r, p: asyncio.create_task(on_connect(c, f, r, p))
-#     mqtt_client.on_message = lambda c, t, p, q, pr: asyncio.create_task(on_message(c, t, p, q, pr))
-
-#     mqtt_client.set_auth_credentials(USERNAME, PASSWORD)
-
-#     await mqtt_client.connect(BROKER_HOST, BROKER_PORT, ssl=ssl_context)
-#     await _mqtt_connected_event.wait()
-#     logger.info("[MQTT] Ready")
-
-#     _mqtt_task = asyncio.create_task(mqtt_client.listen())
-#     logger.info("[MQTT] Listen task started")
-#     await _mqtt_task
+# ---------------------------------------------------------------------------
+# Lifecycle
+# ---------------------------------------------------------------------------
 
 async def start_mqtt_loop():
-    global _mqtt_task
+    """
+    Connect to the MQTT broker, subscribe to all topics, then run the
+    blocking listen loop.  This coroutine only returns when the listen
+    task is cancelled (e.g. on application shutdown).
+    """
+    global _mqtt_listen_task
 
     mqtt_client.on_connect = lambda c, f, r, p: asyncio.create_task(on_connect(c, f, r, p))
+    mqtt_client.on_disconnect = lambda c, pkt, exc=None: asyncio.create_task(on_disconnect(c, pkt, exc))
     mqtt_client.on_message = lambda c, t, p, q, pr: asyncio.create_task(on_message(c, t, p, q, pr))
 
-    mqtt_client.set_auth_credentials(USERNAME, PASSWORD)
+    if USERNAME:
+        mqtt_client.set_auth_credentials(USERNAME, PASSWORD)
 
-    # اتصال به بروکر
     await mqtt_client.connect(BROKER_HOST, BROKER_PORT, ssl=ssl_context)
 
-    # صبر کن تا connected event فعال بشه
+    # Wait until the on_connect callback fires
     await _mqtt_connected_event.wait()
-    logger.info("[MQTT] Ready")
+    logger.info("[MQTT] Ready — starting listen loop")
 
+    # gmqtt's listen() is a blocking coroutine that drives the I/O loop.
+    # Wrap it in a task so shutdown_mqtt() can cancel it independently.
+    _mqtt_listen_task = asyncio.create_task(mqtt_client.listen())
+    try:
+        await _mqtt_listen_task
+    except asyncio.CancelledError:
+        logger.info("[MQTT] Listen task cancelled")
+        raise  # propagate so main.py can await the outer task cleanly
 
-def mqtt_publish(topic: str, payload: dict, device_id: str = None):
-    if not _mqtt_connected_event.is_set():
-        logger.warning("⚠ MQTT not connected yet")
-        return
-    mqtt_client.publish(topic, json.dumps(payload))
-    logger.bind(device_id=device_id).info(f"[MQTT] Published to {topic}: {payload}")
-
-
-# async def shutdown_mqtt():
-#     if _mqtt_task:
-#         _mqtt_task.cancel()
-#         try:
-#             await _mqtt_task
-#         except asyncio.CancelledError:
-#             pass
-#     await mqtt_client.disconnect()
-#     logger.info("[MQTT] Disconnected cleanly")
 
 async def shutdown_mqtt():
-    await mqtt_client.disconnect()
-    logger.info("[MQTT] Disconnected cleanly")
+    """Cancel the listen task and disconnect cleanly."""
+    global _mqtt_listen_task
+
+    if _mqtt_listen_task and not _mqtt_listen_task.done():
+        _mqtt_listen_task.cancel()
+        try:
+            await _mqtt_listen_task
+        except asyncio.CancelledError:
+            pass
+
+    try:
+        await mqtt_client.disconnect()
+        logger.info("[MQTT] Disconnected cleanly")
+    except Exception as e:
+        logger.warning(f"[MQTT] Error during disconnect: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Publish helper
+# ---------------------------------------------------------------------------
+
+def mqtt_publish(topic: str, payload: dict, device_id: str = None, qos: int = 1):
+    """
+    Synchronous publish helper — safe to call from sync or async context.
+    gmqtt.publish() is non-blocking internally (it queues the message).
+    """
+    if not _mqtt_connected_event.is_set():
+        logger.warning(f"[MQTT] Cannot publish — not connected (topic={topic})")
+        return False
+
+    try:
+        mqtt_client.publish(topic, json.dumps(payload), qos=qos)
+        logger.bind(device_id=device_id).info(f"[MQTT] Published to '{topic}': {payload}")
+        return True
+    except Exception as e:
+        logger.error(f"[MQTT] Publish failed (topic={topic}): {e}")
+        return False

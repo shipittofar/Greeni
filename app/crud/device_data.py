@@ -1,21 +1,31 @@
 # app/crud/device_data.py
-from sqlalchemy.ext.asyncio import AsyncSession
+from app.db.session import SessionLocal
 from app.models.device_data import DeviceData
-from app.schemas.device_data import DeviceDataCreate
+from loguru import logger
 
-async def create_device_data_in_db(device_id: str, data: dict, db: AsyncSession = None):
-    from app.db.session import async_session  # fallback if db is None
 
-    payload = DeviceData(
-        device_id=device_id,
-        timestamp=data.get("timestamp"),
-        data=data.get("sensors")
-    )
+async def create_device_data_in_db(device_id: str, data: dict) -> None:
+    """
+    Persist a device telemetry payload.  Uses a dedicated sync session so it
+    can be called from any async MQTT handler without needing an injected db.
 
-    if db is None:
-        async with async_session() as session:
-            async with session.begin():
-                session.add(payload)
-    else:
-        db.add(payload)
-        await db.flush()
+    Expected 'data' keys:
+        timestamp  (str | None)  – ISO-8601 timestamp from the device
+        sensors    (dict | None) – sensor readings
+    """
+    db = SessionLocal()
+    try:
+        record = DeviceData(
+            device_id=device_id,
+            timestamp=data.get("timestamp"),
+            data=data.get("sensors"),
+        )
+        db.add(record)
+        db.commit()
+        logger.debug(f"[DeviceData] Persisted record for device '{device_id}'")
+    except Exception as e:
+        db.rollback()
+        logger.exception(f"[DeviceData] Failed to persist record for device '{device_id}': {e}")
+        raise
+    finally:
+        db.close()
